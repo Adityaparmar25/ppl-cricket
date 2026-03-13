@@ -47,8 +47,8 @@ export const authOptions: NextAuthOptions = {
 
   secret: process.env.NEXTAUTH_SECRET,
 
-  // Required for Vercel — allows NextAuth to trust the host header
-  trustHost: true,
+  // trustHost is next-auth v5 only — v4 uses NEXTAUTH_URL env var instead
+  // Make sure NEXTAUTH_URL=https://ppl-cricket.vercel.app is set in Vercel
 
   callbacks: {
     async jwt({ token, user }) {
