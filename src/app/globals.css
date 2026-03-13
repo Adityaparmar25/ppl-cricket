@@ -3,25 +3,42 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --flame-primary:   #E8510A;
+  --flame-secondary: #F5A623;
+  --flame-glow:      #FF6B2B;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Force all select dropdowns to be dark */
+select {
+  background-color: #1A1A1A !important;
+  color: white !important;
+  color-scheme: dark;
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+select option {
+  background-color: #1A1A1A;
+  color: white;
 }
+
+select option:hover,
+select option:checked {
+  background-color: #E8510A;
+  color: white;
+}
+
+/* Scrollbar dark */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0D0D0D; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 
 @layer utilities {
-  .text-balance {
-    text-wrap: balance;
+  .flame-glow {
+    text-shadow: 0 0 20px var(--flame-glow);
+  }
+  .card-dark {
+    @apply bg-[#1A1A1A] rounded-xl border border-white/10;
+  }
+  .label {
+    @apply block text-xs text-gray-400 uppercase tracking-wider mb-2;
   }
 }
