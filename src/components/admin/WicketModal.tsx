@@ -41,8 +41,10 @@ export default function WicketModal({ match, innings, onSubmit, onClose }: Props
 
   // Players not yet out and not currently batting = next available batsmen
   const currentBatsmenIds = innings.currentBatsmen.map((b) => b.playerId);
+  const dismissedIds = innings.dismissedPlayerIds ?? [];
+
   const availableBatsmen: PlayerInfo[] = battingTeam.players.filter(
-    (p) => !currentBatsmenIds.includes(p.id)
+    (p) => !currentBatsmenIds.includes(p.id) && !dismissedIds.includes(p.id)
   );
 
   const selectedType = WICKET_TYPES.find((w) => w.value === wicketType);

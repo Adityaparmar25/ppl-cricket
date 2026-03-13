@@ -56,6 +56,7 @@ export interface InningsState {
   recentBalls:      BallIcon[];
   fallOfWickets:    FallOfWicket[];
   isComplete:       boolean;
+  dismissedPlayerIds: string[];
 }
 
 export interface BatsmanScore {

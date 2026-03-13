@@ -2,26 +2,18 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import type { MatchState, InningsState, BallIcon } from '@/types/cricket';
 
-// ─── helpers ────────────────────────────────────────────────────────────────
-function oversDisplay(balls: number) {
-  return `${Math.floor(balls / 6)}.${balls % 6}`;
-}
-function runRate(runs: number, balls: number) {
-  if (!balls) return 0;
-  return parseFloat(((runs / balls) * 6).toFixed(2));
-}
-function reqRunRate(target: number, runs: number, ballsRemaining: number) {
-  if (ballsRemaining <= 0) return 999;
-  return parseFloat((((target - runs) / ballsRemaining) * 6).toFixed(2));
-}
-
-// ─── transform raw Prisma innings → InningsState ─────────────────────────────
+// ─── buildInningsState ───────────────────────────────────────────────────────
 function buildInningsState(innings: any, players: any[], totalOvers: number): InningsState {
-  const events: any[] = innings.ballEvents ?? [];
+  const events: any[]       = innings.ballEvents   ?? [];
+  const partnerships: any[] = innings.partnerships ?? [];
+  const activePartnership   = partnerships.find((p: any) => p.isActive) ?? null;
 
-  // ── current over balls (last ≤6 legal deliveries) ──
-  const currentOverNo = Math.floor(innings.balls / 6) + 1;
-  const currentOverEvents = events.filter((e: any) => e.overNo === currentOverNo);
+  // ── Current over balls ────────────────────────────────────────────────────
+  const maxOverNo = events.length > 0
+    ? Math.max(...events.map((e: any) => e.overNo))
+    : 1;
+  const currentOverEvents = events.filter((e: any) => e.overNo === maxOverNo);
+
   const recentBalls: BallIcon[] = currentOverEvents.map((e: any) => {
     if (e.isWicket)   return { type: 'wicket' };
     if (e.isSix)      return { type: 'six',    value: 6 };
@@ -32,15 +24,21 @@ function buildInningsState(innings: any, players: any[], totalOvers: number): In
     return { type: 'runs', value: e.runs };
   });
 
-  // ── batsmen stats from ball events ──
+  // ── Batsman stats from ball events ────────────────────────────────────────
   const batsmanMap: Record<string, any> = {};
+
   for (const e of events) {
     if (!e.batsmanId) continue;
     if (!batsmanMap[e.batsmanId]) {
       batsmanMap[e.batsmanId] = {
-        playerId: e.batsmanId,
-        runs: 0, balls: 0, fours: 0, sixes: 0,
-        isOnStrike: false, isOut: false, dismissalInfo: '',
+        playerId:     e.batsmanId,
+        runs:         0,
+        balls:        0,
+        fours:        0,
+        sixes:        0,
+        isOnStrike:   false,
+        isOut:        false,
+        dismissalInfo: '',
       };
     }
     const b = batsmanMap[e.batsmanId];
@@ -51,156 +49,178 @@ function buildInningsState(innings: any, players: any[], totalOvers: number): In
       if (e.isSix)      b.sixes += 1;
     }
     if (e.isWicket) {
-      b.isOut = true;
+      b.isOut         = true;
       b.dismissalInfo = e.wicketType ?? 'out';
     }
   }
 
-  // ── Always seed current batsmen from active partnership ──
-  // New batsman after wicket has no ball events yet — must come from partnership
-  const activePartnership = innings.partnerships?.find((p: any) => p.isActive);
-
-  // Seed BOTH batsmen from active partnership if not already in batsmanMap
-  // This handles: (1) match start with no balls, (2) new batsman after wicket
+  // ── Seed from active partnership (handles new batsman with 0 balls) ────────
   if (activePartnership) {
     for (const pid of [activePartnership.batter1Id, activePartnership.batter2Id]) {
       if (pid && !batsmanMap[pid]) {
         batsmanMap[pid] = {
-          playerId: pid, runs: 0, balls: 0,
-          fours: 0, sixes: 0, isOnStrike: false, isOut: false, dismissalInfo: '',
+          playerId:      pid,
+          runs:          0,
+          balls:         0,
+          fours:         0,
+          sixes:         0,
+          isOnStrike:    false,
+          isOut:         false,
+          dismissalInfo: '',
         };
       }
     }
   }
 
-  // ── Strike rotation ──
-  // Get all partnership batter IDs to identify the two current batsmen
-  const currentPairIds = activePartnership
-    ? [activePartnership.batter1Id, activePartnership.batter2Id].filter(Boolean)
-    : [];
-
-  // Use only ball events from the CURRENT partnership to count swaps
-  // (reset swap count after each wicket / new partnership)
-  const partnershipStartBall = (() => {
-    // Find how many wickets fell before this partnership
-    const wicketEvents = events.filter((e: any) => e.isWicket);
-    const wicketsBefore = wicketEvents.length; // each wicket = new partnership
-    // Count legal balls before this partnership started
-    let legalBallCount = 0;
-    let wicketsSeen = 0;
-    for (const e of events) {
-      if (wicketsSeen >= wicketsBefore) break;
-      if (e.isWicket) wicketsSeen++;
-      if (!e.isWide && !e.isNoBall) legalBallCount++;
+  // ── Striker calculation ───────────────────────────────────────────────────
+  const strikerIdFinal = (() => {
+    if (!activePartnership?.batter1Id) {
+      // No partnership — fall back to last batsman who faced a ball and isn't out
+      const lastBatsman = events
+        .slice()
+        .reverse()
+        .find((e: any) => e.batsmanId && !batsmanMap[e.batsmanId]?.isOut);
+      return lastBatsman?.batsmanId ?? '';
     }
-    return legalBallCount;
-  })();
 
-  // Balls bowled in current partnership (after last wicket)
-  const lastWicketIdx = (() => {
-    let idx = -1;
+    const b1 = activePartnership.batter1Id as string;
+    const b2 = activePartnership.batter2Id as string;
+
+    // Only count balls since this partnership started (after last wicket)
+    let lastWicketIdx = -1;
     for (let i = 0; i < events.length; i++) {
-      if (events[i].isWicket) idx = i;
+      if (events[i].isWicket) lastWicketIdx = i;
     }
-    return idx;
+    const partnershipBalls = events.slice(lastWicketIdx + 1);
+
+    let onStrike  = b1;
+    let offStrike = b2;
+
+    for (const e of partnershipBalls) {
+      if (e.isWide || e.isNoBall) continue; // only legal balls affect strike
+      if ((e.runs ?? 0) % 2 === 1) {
+        [onStrike, offStrike] = [offStrike, onStrike]; // odd runs → swap
+      }
+      if (e.ballNo === 6) {
+        [onStrike, offStrike] = [offStrike, onStrike]; // end of over → swap
+      }
+    }
+    return onStrike;
   })();
-  const ballsInPartnership = events
-    .slice(lastWicketIdx + 1)
-    .filter((e: any) => !e.isWide && !e.isNoBall);
 
-  // Count odd-run swaps in current partnership
-  let swapCount = 0;
-  let overAtPartnershipStart = Math.floor(partnershipStartBall / 6);
-
-  for (const e of ballsInPartnership) {
-    if ((e.runs ?? 0) % 2 === 1) swapCount++;
-  }
-
-  // Add end-of-over swaps since partnership started
-  const currentCompletedOvers = Math.floor(innings.balls / 6);
-  swapCount += currentCompletedOvers - overAtPartnershipStart;
-
-  // New batsman (batter1 of active partnership) starts on strike
-  // Even swaps = batter1 on strike, odd = batter2
-  const b1 = activePartnership?.batter1Id;
-  const b2 = activePartnership?.batter2Id;
-  strikerIdFinal = (swapCount % 2 === 0) ? (b1 ?? '') : (b2 ?? '');
-
-  // Apply strike
+  // Apply strike flag
   for (const b of Object.values(batsmanMap) as any[]) {
     b.isOnStrike = b.playerId === strikerIdFinal;
   }
 
-  const currentBatsmen = Object.values(batsmanMap)
-    .filter((b: any) => !b.isOut)
-    .map((b: any) => {
-      const p = players.find((pl) => pl.id === b.playerId);
+  // ── Current batsmen from active partnership ────────────────────────────────
+  const activePairIds: string[] = activePartnership
+    ? [activePartnership.batter1Id, activePartnership.batter2Id].filter(Boolean) as string[]
+    : Object.keys(batsmanMap).filter((id) => !batsmanMap[id].isOut).slice(0, 2);
+
+  const currentBatsmen = activePairIds
+    .map((pid: string) => {
+      const b = batsmanMap[pid];
+      if (!b) return null;
+      const p = players.find((pl: any) => pl.id === pid);
       return {
         ...b,
-        displayName: p?.displayName ?? b.playerId,
-        strikeRate: b.balls ? parseFloat(((b.runs / b.balls) * 100).toFixed(1)) : 0,
+        displayName: p?.displayName ?? pid,
+        strikeRate:  b.balls
+          ? parseFloat(((b.runs / b.balls) * 100).toFixed(1))
+          : 0,
       };
-    });
+    })
+    .filter(Boolean);
 
-  // ── current bowler ──
-  const lastOver = innings.overs?.slice().sort((a: any, b: any) => b.overNo - a.overNo)[0];
+  // ── Current bowler ────────────────────────────────────────────────────────
+  const sortedOvers = (innings.overs ?? [])
+    .slice()
+    .sort((a: any, b: any) => b.overNo - a.overNo);
+  const lastOver = sortedOvers[0];
+
   const currentBowler = lastOver
     ? (() => {
-        const p = players.find((pl) => pl.id === lastOver.bowlerId);
-        const bowlerOvers = innings.overs?.filter((o: any) => o.bowlerId === lastOver.bowlerId) ?? [];
-        const totalRuns    = bowlerOvers.reduce((s: number, o: any) => s + o.runs, 0);
+        const p = players.find((pl: any) => pl.id === lastOver.bowlerId);
+        const bowlerOvers = (innings.overs ?? []).filter(
+          (o: any) => o.bowlerId === lastOver.bowlerId
+        );
+        const totalRuns    = bowlerOvers.reduce((s: number, o: any) => s + o.runs,    0);
         const totalWickets = bowlerOvers.reduce((s: number, o: any) => s + o.wickets, 0);
-        const totalBalls   = bowlerOvers.reduce((s: number, o: any) => s + o.balls, 0);
+        const totalBalls   = bowlerOvers.reduce((s: number, o: any) => s + o.balls,   0);
         return {
           playerId:    lastOver.bowlerId,
           displayName: p?.displayName ?? lastOver.bowlerId,
-          overs:       oversDisplay(totalBalls),
-          maidens:     bowlerOvers.filter((o: any) => o.maidens).length,
+          overs:       `${Math.floor(totalBalls / 6)}.${totalBalls % 6}`,
+          maidens:     bowlerOvers.filter((o: any) => o.maidens > 0).length,
           runs:        totalRuns,
           wickets:     totalWickets,
-          economy:     totalBalls ? parseFloat(((totalRuns / totalBalls) * 6).toFixed(2)) : 0,
+          economy:     totalBalls
+            ? parseFloat(((totalRuns / totalBalls) * 6).toFixed(2))
+            : 0,
         };
       })()
     : undefined;
 
-  // ── fall of wickets ──
-  const wicketEvents = events.filter((e: any) => e.isWicket);
-  const fallOfWickets = wicketEvents.map((e: any, i: number) => {
-    const p = players.find((pl) => pl.id === e.batsmanId);
-    return {
-      wicketNo:   i + 1,
-      score:      0, // would need cumulative score calc — simplified
-      playerName: p?.displayName ?? 'Unknown',
-      over:       `${e.overNo}.${e.ballNo}`,
-    };
-  });
+  // ── Fall of wickets ───────────────────────────────────────────────────────
+  const fallOfWickets = events
+    .filter((e: any) => e.isWicket)
+    .map((e: any, i: number) => {
+      const p = players.find((pl: any) => pl.id === e.batsmanId);
+      return {
+        wicketNo:   i + 1,
+        score:      0,
+        playerName: p?.displayName ?? 'Unknown',
+        over:       `${e.overNo}.${e.ballNo}`,
+      };
+    });
 
+  // ── Dismissed player IDs (batted + got out — hide from Next Batsman list) ──
+  const dismissedPlayerIds: string[] = Object.values(batsmanMap)
+    .filter((b: any) => b.isOut === true)
+    .map((b: any) => b.playerId as string);
+
+  // ── Run rate calculations ─────────────────────────────────────────────────
   const ballsRemaining = totalOvers * 6 - innings.balls;
 
-  return {
-    id:               innings.id,
-    inningsNo:        innings.inningsNo,
-    battingTeamId:    innings.battingTeamId,
-    totalRuns:        innings.totalRuns,
-    wickets:          innings.wickets,
-    balls:            innings.balls,
-    overs:            oversDisplay(innings.balls),
-    currentRunRate:   runRate(innings.totalRuns, innings.balls),
-    requiredRunRate:  innings.target ? reqRunRate(innings.target, innings.totalRuns, ballsRemaining) : undefined,
-    target:           innings.target ?? undefined,
+  const currentRunRate: number = innings.balls
+    ? parseFloat(((innings.totalRuns / innings.balls) * 6).toFixed(2))
+    : 0;
+
+  const requiredRunRate: number | undefined = innings.target
+    ? ballsRemaining > 0
+      ? parseFloat((((innings.target - innings.totalRuns) / ballsRemaining) * 6).toFixed(2))
+      : 999
+    : undefined;
+
+  // ── Return ────────────────────────────────────────────────────────────────
+  const result: InningsState = {
+    id:                innings.id,
+    inningsNo:         innings.inningsNo,
+    battingTeamId:     innings.battingTeamId,
+    totalRuns:         innings.totalRuns,
+    wickets:           innings.wickets,
+    balls:             innings.balls,
+    overs:             `${Math.floor(innings.balls / 6)}.${innings.balls % 6}`,
+    currentRunRate,
+    requiredRunRate,
+    target:            innings.target   ?? undefined,
     extras: {
-      wide:    innings.extrasWide,
-      noBall:  innings.extrasNoBall,
-      bye:     innings.extrasBye,
-      legBye:  innings.extrasLegBye,
-      total:   innings.extrasWide + innings.extrasNoBall + innings.extrasBye + innings.extrasLegBye,
+      wide:   innings.extrasWide,
+      noBall: innings.extrasNoBall,
+      bye:    innings.extrasBye,
+      legBye: innings.extrasLegBye,
+      total:  innings.extrasWide + innings.extrasNoBall + innings.extrasBye + innings.extrasLegBye,
     },
     currentBatsmen,
     currentBowler,
     recentBalls,
     fallOfWickets,
-    isComplete: innings.isComplete,
+    dismissedPlayerIds,
+    isComplete:        innings.isComplete,
   };
+
+  return result;
 }
 
 // ─── GET /api/match ──────────────────────────────────────────────────────────
@@ -212,8 +232,8 @@ export async function GET() {
         teams: { include: { players: true } },
         innings: {
           include: {
-            ballEvents: { orderBy: { createdAt: 'asc' } },
-            overs:       { orderBy: { overNo: 'asc' } },
+            ballEvents:   { orderBy: { createdAt: 'asc' } },
+            overs:        { orderBy: { overNo:    'asc' } },
             partnerships: true,
           },
         },
@@ -224,9 +244,14 @@ export async function GET() {
       return NextResponse.json({ error: 'No match found' }, { status: 404 });
     }
 
-    const team1 = raw.teams.find((t) => t.id === raw.team1Id)!;
-    const team2 = raw.teams.find((t) => t.id === raw.team2Id)!;
-    const allPlayers = [...(team1?.players ?? []), ...(team2?.players ?? [])];
+    const team1 = raw.teams.find((t) => t.id === raw.team1Id);
+    const team2 = raw.teams.find((t) => t.id === raw.team2Id);
+
+    if (!team1 || !team2) {
+      return NextResponse.json({ error: 'Teams not found' }, { status: 404 });
+    }
+
+    const allPlayers = [...team1.players, ...team2.players];
 
     const innings1Raw = raw.innings.find((i) => i.inningsNo === 1);
     const innings2Raw = raw.innings.find((i) => i.inningsNo === 2);
@@ -236,11 +261,15 @@ export async function GET() {
       title:          raw.title,
       status:         raw.status as any,
       totalOvers:     raw.totalOvers,
+      currentInnings: raw.currentInnings,
+      tossWonById:    raw.tossWonById    ?? undefined,
+      battingFirstId: raw.battingFirstId ?? undefined,
+      resultText:     raw.resultText     ?? undefined,
       team1: {
-        id:        team1?.id ?? '',
-        name:      team1?.name ?? '',
-        shortName: team1?.shortName ?? '',
-        players:   (team1?.players ?? []).map((p) => ({
+        id:        team1.id,
+        name:      team1.name,
+        shortName: team1.shortName,
+        players:   team1.players.map((p) => ({
           id:          p.id,
           name:        p.name,
           displayName: p.displayName,
@@ -249,10 +278,10 @@ export async function GET() {
         })),
       },
       team2: {
-        id:        team2?.id ?? '',
-        name:      team2?.name ?? '',
-        shortName: team2?.shortName ?? '',
-        players:   (team2?.players ?? []).map((p) => ({
+        id:        team2.id,
+        name:      team2.name,
+        shortName: team2.shortName,
+        players:   team2.players.map((p) => ({
           id:          p.id,
           name:        p.name,
           displayName: p.displayName,
@@ -260,12 +289,12 @@ export async function GET() {
           jerseyNo:    p.jerseyNo ?? undefined,
         })),
       },
-      currentInnings:  raw.currentInnings,
-      tossWonById:     raw.tossWonById    ?? undefined,
-      battingFirstId:  raw.battingFirstId ?? undefined,
-      resultText:      raw.resultText ?? undefined,
-      innings1: innings1Raw ? buildInningsState(innings1Raw, allPlayers, raw.totalOvers) : undefined,
-      innings2: innings2Raw ? buildInningsState(innings2Raw, allPlayers, raw.totalOvers) : undefined,
+      innings1: innings1Raw
+        ? buildInningsState(innings1Raw, allPlayers, raw.totalOvers)
+        : undefined,
+      innings2: innings2Raw
+        ? buildInningsState(innings2Raw, allPlayers, raw.totalOvers)
+        : undefined,
     };
 
     return NextResponse.json(matchState);

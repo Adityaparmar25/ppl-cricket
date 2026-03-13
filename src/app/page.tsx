@@ -61,9 +61,9 @@ export default function PublicScorePage() {
           {match?.team2?.name ?? 'Kanha x Nallamala'}
         </p>
         <div className="card-dark px-6 py-4 mt-2 space-y-1">
-          <p className="text-gray-400 text-sm">📅 March 14, 2026</p>
+          <p className="text-gray-400 text-sm">📅 March 16, 2026</p>
           <p className="text-gray-500 text-xs">
-            {match?.status === 'TOSS' ? '🪙 Toss in progress...' : "Match hasn't started yet — check back soon!"}
+            {match?.status === 'TOSS' ? '🪙 Toss in progress...' : "Match hasn't started yet - check back soon!"}
           </p>
         </div>
         <p className="text-gray-700 text-xs mt-2">Auto-refreshing every 15s</p>
