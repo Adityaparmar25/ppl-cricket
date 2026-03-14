@@ -1,19 +1,20 @@
 import { PrismaClient } from '@prisma/client';
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  datasources: {
+    db: { url: process.env.DIRECT_URL ?? process.env.DATABASE_URL },
+  },
+});
 
 async function main() {
   console.log('🌱 Starting seed...');
 
-  // Clean existing data (safe to re-run)
-  await prisma.auditLog.deleteMany();
-  await prisma.ballEvent.deleteMany();
-  await prisma.partnership.deleteMany();
-  await prisma.over.deleteMany();
-  await prisma.innings.deleteMany();
-  await prisma.player.deleteMany();
-  await prisma.team.deleteMany();
-  await prisma.match.deleteMany();
+  await prisma.$executeRawUnsafe(`
+    TRUNCATE TABLE 
+      "AuditLog", "BallEvent", "Partnership", 
+      "Over", "Innings", "Player", "Team", "Match"
+    RESTART IDENTITY CASCADE
+  `);
   console.log('🧹 Cleared old data');
 
   // ── Step 1: Create Match (team1Id/team2Id filled after teams exist) ──
